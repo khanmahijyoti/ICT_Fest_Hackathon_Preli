@@ -1,4 +1,6 @@
 """Authentication endpoints: register, login, refresh, logout."""
+import threading
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,45 +22,48 @@ from ..schemas import LoginRequest, RefreshRequest, RegisterRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_registration_lock = threading.Lock()
+
 
 @router.post("/register", status_code=201)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    org = db.query(Organization).filter(Organization.name == payload.org_name).first()
-    role = "admin" if org is None else "member"
-    if org is None:
-        org = Organization(name=payload.org_name)
-        db.add(org)
+    with _registration_lock:
+        org = db.query(Organization).filter(Organization.name == payload.org_name).first()
+        role = "admin" if org is None else "member"
+        if org is None:
+            org = Organization(name=payload.org_name)
+            db.add(org)
+            try:
+                db.commit()
+                db.refresh(org)
+            except IntegrityError:
+                # A concurrent request created the org first; join it as member.
+                db.rollback()
+                org = db.query(Organization).filter(Organization.name == payload.org_name).first()
+                role = "member"
+
+        existing = (
+            db.query(User)
+            .filter(User.org_id == org.id, User.username == payload.username)
+            .first()
+        )
+        if existing is not None:
+            raise AppError(409, "USERNAME_TAKEN", "Username already taken in this organization")
+
+        user = User(
+            org_id=org.id,
+            username=payload.username,
+            hashed_password=hash_password(payload.password),
+            role=role,
+        )
+        db.add(user)
         try:
             db.commit()
-            db.refresh(org)
         except IntegrityError:
-            # A concurrent request created the org first; join it as member.
+            # A concurrent request registered the same username first.
             db.rollback()
-            org = db.query(Organization).filter(Organization.name == payload.org_name).first()
-            role = "member"
-
-    existing = (
-        db.query(User)
-        .filter(User.org_id == org.id, User.username == payload.username)
-        .first()
-    )
-    if existing is not None:
-        raise AppError(409, "USERNAME_TAKEN", "Username already taken in this organization")
-
-    user = User(
-        org_id=org.id,
-        username=payload.username,
-        hashed_password=hash_password(payload.password),
-        role=role,
-    )
-    db.add(user)
-    try:
-        db.commit()
-    except IntegrityError:
-        # A concurrent request registered the same username first.
-        db.rollback()
-        raise AppError(409, "USERNAME_TAKEN", "Username already taken in this organization")
-    db.refresh(user)
+            raise AppError(409, "USERNAME_TAKEN", "Username already taken in this organization")
+        db.refresh(user)
     return {
         "user_id": user.id,
         "org_id": org.id,

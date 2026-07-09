@@ -31,6 +31,11 @@ Line numbers refer to the original (unfixed) code at the initial commit. Bugs ar
 - **Bug:** Two concurrent registrations with the same username (or same new org name) could both pass the existence check, then one would hit the DB unique constraint and surface as an unhandled 500. Rules 15/16 imply valid requests must produce contractual responses, never crashes.
 - **Fix:** Wrapped both commits in `try/except IntegrityError` with rollback: username race → `409 USERNAME_TAKEN`; org-name race → re-fetch the winner's org and join it as member. Verified: 8 concurrent same-username registers produce exactly one 201 and seven 409s, no 500s.
 
+### 5a. Concurrent first-user registration could leave the new org without an admin
+- **File/line:** `app/routers/auth.py:25-66` (`register`)
+- **Bug:** When several requests registered the same brand-new org and username at once, one request could create the organization, while a competing request joined that new organization as a member and won the username insert race. The only successful response could therefore be role `member`, leaving the organization with no admin. Rule 15 requires the first user for an unknown org to be `admin`, while duplicate usernames in the org must return `409 USERNAME_TAKEN`.
+- **Fix:** Added a small registration lock around org lookup/creation, duplicate-user detection, and user insert. The winning request for a new org now creates the admin atomically; same-username competitors reliably receive `409 USERNAME_TAKEN`. Verified with repeated 16-way concurrent registration bursts.
+
 ---
 
 ## Booking Creation
@@ -185,7 +190,7 @@ All fixes were verified against a running server:
 - Comprehensive black-box suite (`tests/live_api_suite.py`, 173 checks) covering every endpoint, every business rule (Rules 1–16), the full error-code contract, and the concurrency guarantees passes end-to-end against the Docker container: `python tests/live_api_suite.py`. (The file deliberately avoids pytest's `*_test.py` naming so a plain `pytest` run only collects the offline smoke test.)
 - Existing smoke test (`tests/test_smoke.py`) passes.
 - 23 sequential functional checks: register/duplicate-username, token lifetime = 900 s, refresh single-use, logout revocation, back-to-back vs overlapping bookings, zero-duration rejection, booking-detail `start_time`, refund tiers (100/50/0) with response == ledger, `ALREADY_CANCELLED`, pagination, member quota (3 then 409, >24 h exempt), admin quota exemption, stats consistency.
-- 6 concurrency checks: same-username register race (one 201, seven 409, zero 500), identical-slot booking race (one 201, five 409), 6 concurrent creations → 6 unique reference codes, concurrent cancel (one 200, five 409, exactly one RefundLog), stats exact after the burst.
+- 6 concurrency checks: same-username register race (one 201 admin, remaining requests 409, zero 500), identical-slot booking race (one 201, five 409), 6 concurrent creations → 6 unique reference codes, concurrent cancel (one 200, five 409, exactly one RefundLog), stats exact after the burst.
 - Direct unit check of UTC offset conversion (`+06:00` → correct UTC, naive passthrough) and response rendering with explicit UTC designator.
 
 No API contract changes: all paths, status codes, error codes, and JSON field names are exactly as specified.
