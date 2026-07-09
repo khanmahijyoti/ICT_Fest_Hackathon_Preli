@@ -155,15 +155,6 @@ Line numbers refer to the original (unfixed) code at the initial commit. Bugs ar
 
 ---
 
-## Input Validation
-
-### 26. Malformed booking datetimes crashed with 500 instead of 400
-- **File/line:** `app/routers/bookings.py:88-89` (`create_booking`), via `app/timeutils.py:11` (`parse_input_datetime`)
-- **Bug:** `POST /bookings` passed `start_time`/`end_time` straight into `datetime.fromisoformat()` with no error handling. Any non-ISO string (e.g. `"banana"`, `""`) raised an unhandled `ValueError` → **500 Internal Server Error**. The service must always answer with a contractual response (Rule 16); an unparseable booking window belongs to `INVALID_BOOKING_WINDOW` (400).
-- **Fix:** Wrapped the two parses in `try/except ValueError` raising `AppError(400, "INVALID_BOOKING_WINDOW", ...)`. Verified: garbage/empty `start_time`/`end_time` now return `400 INVALID_BOOKING_WINDOW`, valid inputs unaffected.
-
----
-
 ## Liveness
 
 ### 24. Deadlock between concurrent create and cancel notifications
@@ -178,11 +169,20 @@ Line numbers refer to the original (unfixed) code at the initial commit. Bugs ar
 
 ---
 
+## Input Validation
+
+### 26. Malformed booking datetimes crashed with 500 instead of 400
+- **File/line:** `app/routers/bookings.py:88-89` (`create_booking`), via `app/timeutils.py:11` (`parse_input_datetime`)
+- **Bug:** `POST /bookings` passed `start_time`/`end_time` straight into `datetime.fromisoformat()` with no error handling. Any non-ISO string (e.g. `"banana"`, `""`) raised an unhandled `ValueError` → **500 Internal Server Error**. The service must always answer with a contractual response (Rule 16); an unparseable booking window belongs to `INVALID_BOOKING_WINDOW` (400).
+- **Fix:** Wrapped the two parses in `try/except ValueError` raising `AppError(400, "INVALID_BOOKING_WINDOW", ...)`. Verified: garbage/empty `start_time`/`end_time` now return `400 INVALID_BOOKING_WINDOW`, valid inputs unaffected.
+
+---
+
 ## Verification
 
 All fixes were verified against a running server:
 
-- Comprehensive black-box suite (`tests/api_live_test.py`, 173 checks) covering every endpoint, every business rule (Rules 1–16), the full error-code contract, and the concurrency guarantees passes end-to-end against the Docker container: `python tests/api_live_test.py`.
+- Comprehensive black-box suite (`tests/live_api_suite.py`, 173 checks) covering every endpoint, every business rule (Rules 1–16), the full error-code contract, and the concurrency guarantees passes end-to-end against the Docker container: `python tests/live_api_suite.py`. (The file deliberately avoids pytest's `*_test.py` naming so a plain `pytest` run only collects the offline smoke test.)
 - Existing smoke test (`tests/test_smoke.py`) passes.
 - 23 sequential functional checks: register/duplicate-username, token lifetime = 900 s, refresh single-use, logout revocation, back-to-back vs overlapping bookings, zero-duration rejection, booking-detail `start_time`, refund tiers (100/50/0) with response == ledger, `ALREADY_CANCELLED`, pagination, member quota (3 then 409, >24 h exempt), admin quota exemption, stats consistency.
 - 6 concurrency checks: same-username register race (one 201, seven 409, zero 500), identical-slot booking race (one 201, five 409), 6 concurrent creations → 6 unique reference codes, concurrent cancel (one 200, five 409, exactly one RefundLog), stats exact after the burst.

@@ -4,7 +4,7 @@ Exercises every endpoint and every business rule from the problem statement
 (Sections 3-5), including the concurrency guarantees, against a *running*
 server. Run it with the API up (e.g. ``docker compose up``):
 
-    python tests/api_live_test.py [BASE_URL]
+    python tests/live_api_suite.py [BASE_URL]
 
 BASE_URL defaults to http://localhost:8000. The suite is self-contained and
 re-runnable: every run registers fresh organizations/users/rooms (random
