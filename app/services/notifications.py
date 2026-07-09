@@ -28,8 +28,10 @@ def notify_created(booking) -> None:
             _write_audit("created", booking)
 
 
+# Locks are always acquired in the same order (_email_lock before _audit_lock)
+# so a concurrent create + cancel cannot deadlock.
 def notify_cancelled(booking) -> None:
-    with _audit_lock:
-        _write_audit("cancelled", booking)
-        with _email_lock:
-            _send_email("cancelled", booking)
+    with _email_lock:
+        with _audit_lock:
+            _write_audit("cancelled", booking)
+        _send_email("cancelled", booking)

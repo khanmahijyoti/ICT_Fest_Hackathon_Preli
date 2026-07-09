@@ -4,6 +4,7 @@ import io
 
 from sqlalchemy.orm import Session
 
+from ..errors import AppError
 from ..models import Booking, Room
 from ..timeutils import iso_utc
 
@@ -45,6 +46,11 @@ def generate_export(
     room_id: int | None,
     include_all: bool,
 ) -> str:
+    if room_id is not None:
+        room = db.query(Room).filter(Room.id == room_id, Room.org_id == org_id).first()
+        if room is None:
+            raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
+
     if include_all:
         if room_id is not None:
             rows = fetch_bookings_raw(db, room_id)
