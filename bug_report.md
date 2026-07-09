@@ -1,15 +1,16 @@
 # Bug Report — CoWork: Multi-Tenant Coworking Space Booking API
 
-**26 bugs found and fixed.** All file/line references point to the **original (unfixed) code at the initial commit** (`5bb6f56`). Every fix preserves the API contract exactly — no path, status code, error code, or JSON field name was changed.
+**27 bugs found and fixed.** All file/line references point to the **original (unfixed) code at the initial commit** (`5bb6f56`). Every fix preserves the API contract exactly — no path, status code, error code, or JSON field name was changed.
 
 ## Methodology
 
 1. **Line-by-line code review** of every module against the business rules (problem statement Sections 3–4), treating the rules as the source of truth.
-2. **Black-box verification** with a purpose-built live test suite — [`tests/api_live_test.py`](tests/api_live_test.py), **173 checks** — that exercises every endpoint, every business rule (R1–R16), the full error-code contract, and all concurrency guarantees against the running Docker container:
+2. **Black-box verification** with a purpose-built live test suite — [`tests/live_api_suite.py`](tests/live_api_suite.py), **174 checks** — that exercises every endpoint, every business rule (R1–R16), the full error-code contract, and all concurrency guarantees against the running Docker container:
    ```
    docker compose up --build
-   python tests/api_live_test.py        # 173 checks, all passing
+   python tests/live_api_suite.py       # 174 checks, all passing
    ```
+   (The file deliberately avoids pytest's `*_test.py` naming so a plain `pytest` run only collects the offline smoke test.)
 3. Each bug below was **reproduced against the original code** (observable wrong API behavior), then fixed, then re-verified.
 
 ## Summary
@@ -21,6 +22,7 @@
 | 3  | Auth          | `app/routers/auth.py:82–93`      | Refresh tokens reusable forever (not single-use)                        | R8     | Medium |
 | 4  | Auth          | `app/routers/auth.py:37–43`      | Duplicate username returned 201 with the *existing* user's identity     | R15    | Easy |
 | 5  | Auth          | `app/routers/auth.py` (commits)  | Concurrent registration raced into an unhandled 500 `IntegrityError`   | R15/16 | Medium |
+| 5a | Auth          | `app/routers/auth.py:23–59`      | New-org registration race could leave the org with no admin            | R15    | Hard |
 | 6  | Booking       | `app/routers/bookings.py:50`     | Inclusive overlap check rejected valid back-to-back bookings            | R3     | Easy |
 | 7  | Booking       | `app/routers/bookings.py:86`     | 5-minute grace window accepted bookings starting in the past           | R2     | Easy |
 | 8  | Booking       | `app/routers/bookings.py:93`     | Minimum duration never enforced (0-hour / negative bookings passed)    | R2     | Easy |
@@ -113,6 +115,14 @@
   - username race → loser gets the contractual `409 USERNAME_TAKEN`;
   - org-name race → loser re-fetches the winner's org and joins it as **member** (exactly what would have happened without the race).
 - **Verified by:** suite concurrency check "register race: one 201, seven 409" — 8 threads, same org+username, zero 5xx.
+
+### 5a. Concurrent first-user registration could leave the new org without an admin
+- **Where:** `app/routers/auth.py:23–59` (`register`)
+- **Rule violated:** R15 — the first user of an unknown org must be created as `admin`.
+- **Symptom:** when several requests registered the same brand-new org and username at once, one request could create the organization while a competitor — having lost the org-create race and downgraded itself to `member` — won the username insert. The only 201 response could therefore carry role `member`, leaving the organization permanently without an admin.
+- **Root cause:** the `IntegrityError` handling from #5 makes each individual commit safe, but the lookup → create-org → check-username → insert-user sequence as a whole was still unserialized, so the role decision and the user insert could interleave across requests.
+- **Fix:** added a `_registration_lock` around the whole sequence, so the winning request for a new org deterministically creates it *and* becomes its admin; same-username competitors reliably get `409 USERNAME_TAKEN`. The password hash (deliberately slow PBKDF2) is computed before acquiring the lock to keep the critical section minimal. The `IntegrityError` handlers remain as a backstop.
+- **Verified by:** 16-way concurrent registration bursts for a fresh org: exactly one 201 with role `admin`, fifteen 409s, zero 5xx.
 
 ---
 
@@ -396,12 +406,12 @@
 
 All fixes were verified against the running Docker container:
 
-- **`tests/api_live_test.py` — 173 checks, all passing** (`python tests/api_live_test.py`). The suite is self-contained and re-runnable (each run registers fresh orgs/users/rooms under a random namespace) and covers:
+- **`tests/live_api_suite.py` — 174 checks, all passing** (`python tests/live_api_suite.py`). The suite is self-contained and re-runnable (each run registers fresh orgs/users/rooms under a random namespace) and covers:
   - every endpoint and response shape in the contract, including exact error codes on every failure path;
   - all sixteen business rules, boundary cases included (48 h refund boundary, half-cent rounding, back-to-back bookings, inclusive report range, quota window edge);
   - timezone semantics proven via conflict behavior, not just echo (offset input vs naive-UTC twin);
   - cache freshness (write → immediate re-read of a previously cached response, for all three invalidation paths);
-  - concurrency: same-slot booking race (1 × 201), quota race (exactly 3 × 201), cancel race (1 × 200, exactly one RefundLog), registration race (no 5xx), sequential rate-limit exhaustion (20 pass, then 429s), a mixed create+cancel deadlock probe with hard timeouts, stats exactness after the burst, and global reference-code uniqueness across all 52 bookings created during the run.
+  - concurrency: same-slot booking race (1 × 201), quota race (exactly 3 × 201), cancel race (1 × 200, exactly one RefundLog), registration race (one 201 **admin**, remaining requests 409, zero 5xx), sequential rate-limit exhaustion (20 pass, then 429s), a mixed create+cancel deadlock probe with hard timeouts, stats exactness after the burst, and global reference-code uniqueness across all 52 bookings created during the run.
 - Existing smoke test (`tests/test_smoke.py`) passes.
 
 No API contract changes: all paths, status codes, error codes, and JSON field names are exactly as specified.

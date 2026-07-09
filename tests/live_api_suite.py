@@ -783,11 +783,13 @@ def test_concurrency():
     eq("ledger == winning response",
        refunds[0]["amount_cents"], winner.json()["refund_amount_cents"])
 
-    # --- registration race (R15): one 201, rest 409, zero 5xx ---
-    res, hung = run_threads(8, lambda i: register(f"org-{RUN}-regrace", "samename"))
+    # --- registration race (R15): one 201 admin, rest 409, zero 5xx ---
+    res, hung = run_threads(16, lambda i: register(f"org-{RUN}-regrace", "samename"))
     check("no hang during register race", not hung)
     codes = sorted(r.status_code for r in res)
-    eq("register race: one 201, seven 409", codes, [201] + [409] * 7)
+    eq("register race: one 201, fifteen 409", codes, [201] + [409] * 15)
+    winner = next(r for r in res if r.status_code == 201)
+    eq("register race winner is the org admin", winner.json().get("role"), "admin")
 
     # --- mixed create+cancel burst: liveness / deadlock check (R16) ---
     room_m = make_room(admin, "C4", rate_cents=100)
